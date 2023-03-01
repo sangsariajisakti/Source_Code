@@ -1,0 +1,224 @@
+
+//@version=5
+// order #FO71B55D0ED83
+strategy('ATR Trailing Stop Strategy TP-PConnector', overlay=true, default_qty_type=strategy.fixed, default_qty_value=100, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+//------------------ defining trade session
+groupSession   = "----- entry session -----"
+
+forTimezoneDd  = input.string("UTC-8",      "Timezone to be", options = ["UTC-8", "UTC-5"], group = groupSession, inline = "timezone")
+forTimezoneM   = input.string("",   "",                                             group = groupSession, inline = "timezone")
+tradeTiming    = input.session("0900-1700", "Trade Entry timing",                           group = groupSession)
+applyTradeTime = input.bool(false,          "Apply it ?",                                   group = groupSession)
+sessionBgApply = input.bool(false,          "Apply BG color for trade session",             group = groupSession)
+
+
+forTimezone = forTimezoneM == "" ? forTimezoneDd : forTimezoneM
+inSession   = (na(time(timeframe.period, tradeTiming, forTimezone)) == false)
+bgcolor(sessionBgApply and inSession ? color.new(color.gray, 90) : na)
+
+/////////notes////////////////////////////////////////
+// This is based on the ATR trailing stop indicator //
+// width addition of two levels of stops and        //
+// different interpretation.                        //
+// This is a fast-reacting system and is better     //
+// suited for higher volatility markets             //
+//////////////////////////////////////////////////////
+
+SC = input(close, 'Source')
+
+// Fast Trail //
+AP1 = input(5, 'Fast ATR period')  // ATR Period
+AF1 = input(0.5, 'Fast ATR multiplier')  // ATR Factor
+SL1 = AF1 * ta.atr(AP1)  // Stop Loss
+Trail1 = 0.0
+iff_1 = SC > nz(Trail1[1], 0) ? SC - SL1 : SC + SL1
+iff_2 = SC < nz(Trail1[1], 0) and SC[1] < nz(Trail1[1], 0) ? math.min(nz(Trail1[1], 0), SC + SL1) : iff_1
+Trail1 := SC > nz(Trail1[1], 0) and SC[1] > nz(Trail1[1], 0) ? math.max(nz(Trail1[1], 0), SC - SL1) : iff_2
+
+// Slow Trail //
+AP2 = input(10, 'Slow ATR period')  // ATR Period
+AF2 = input.float(3, 'Slow ATR multiplier')  // ATR Factor
+SL2 = AF2 * ta.atr(AP2)  // Stop Loss
+Trail2 = 0.0
+iff_3 = SC > nz(Trail2[1], 0) ? SC - SL2 : SC + SL2
+iff_4 = SC < nz(Trail2[1], 0) and SC[1] < nz(Trail2[1], 0) ? math.min(nz(Trail2[1], 0), SC + SL2) : iff_3
+Trail2 := SC > nz(Trail2[1], 0) and SC[1] > nz(Trail2[1], 0) ? math.max(nz(Trail2[1], 0), SC - SL2) : iff_4
+
+// Bar color for trade signal //
+Green = Trail1 > Trail2 and close > Trail2 and low > Trail2
+Blue = Trail1 > Trail2 and close > Trail2 and low < Trail2
+Red = Trail2 > Trail1 and close < Trail2 and high < Trail2
+Yellow = Trail2 > Trail1 and close < Trail2 and high > Trail2
+
+// Signals //
+Bull = ta.barssince(Green) < ta.barssince(Red)
+Bear = ta.barssince(Red) < ta.barssince(Green)
+
+Buy = ta.crossover(Trail1, Trail2)
+Sell = ta.crossunder(Trail1, Trail2)
+
+TS1 = plot(Trail1, 'Fast Trail', style=plot.style_line, color=Trail1 > Trail2 ? color.blue : color.yellow, linewidth=2, display=display.none)
+TS2 = plot(Trail2, 'Slow Trail', style=plot.style_line, color=Trail1 > Trail2 ? color.green : color.red, linewidth=2)
+fill(TS1, TS2, Bull ? color.new(color.green, 90) : color.new(color.red, 90), transp=90)
+
+plotcolor = input(true, 'Paint color on chart')
+
+bcl = plotcolor == 1 ? Blue ? color.blue : Green ? color.lime : Yellow ? color.yellow : Red ? color.red : color.white : na
+barcolor(bcl)
+
+//========================================
+//        AUTOMATION COMMANDS
+//========================================
+groupAlertMessage = "---------- alert message / commands ----------"
+// PineConnector Settings
+pc_id           = input.string(title="License ID", defval="ID", group=groupAlertMessage, tooltip="This is your PineConnector license ID")
+pc_symbolInput  = input.string("", "Symbol ID", group=groupAlertMessage, tooltip="Enter symbol ID same as displayed in your MetaTrader")
+pc_prefix       = input.string(title="MetaTrader Prefix", defval="", group=groupAlertMessage, tooltip="This is your broker's MetaTrader symbol prefix")
+pc_suffix       = input.string(title="MetaTrader Suffix", defval="", group=groupAlertMessage, tooltip="This is your broker's MetaTrader symbol suffix")
+
+// Generate PineConnector alert string
+var symbol = pc_prefix + pc_symbolInput + pc_suffix
+
+longEntryCommand = pc_id + ',buy,' + symbol + ',risk=' + "{{strategy.order.contracts}}"
+longExitCommand = pc_id + ",closelongvol,risk=" + "{{strategy.order.contracts}}"
+
+shortEntryCommand = pc_id + ',sell,' + symbol + ',risk=' + "{{strategy.order.contracts}}"
+shortExitCommand  = pc_id + ",closeshortvol,risk=" + "{{strategy.order.contracts}}"
+//=========================================
+//      OTHER VARIABLES AND FUNCTIONS
+//=========================================
+
+positionAllowed = input.string("both", "Positions Allow", options = ["long only", "short only", "both"])
+longPositionAllowed = positionAllowed != "short only"
+shortPositionAllowed = positionAllowed != "long only"
+
+//------------------------------------
+groupRR   = "--- risk reward settings ---"
+
+slPerc    = input.float(5.00, "Stop %",   inline="%", group=groupRR) / 100
+tpPerc    = input.float(5.00, "Target %", inline="%", group=groupRR) / 100
+trailPoints = input.int(10, "trail to x points below TP-1", group = groupRR)
+
+dailyProfitLimit      = input.float(1000,  "daily profit limit",  group = groupRR)
+dailyLossLimit        = input.float(-1000, "daily Loss Limit",    group=groupRR)
+applyDailyProfitLimit = input.bool(false,  "apply limits ?",      group = groupRR)
+
+//------------------------------------
+var allowFurtherTrades = true       // used when profit limit is touched
+
+if not applyDailyProfitLimit
+    allowFurtherTrades := true
+
+// to use as parameter while using - already in a position or not
+buyPos  = strategy.position_size >  0
+sellPos = strategy.position_size <  0
+inPos   = strategy.position_size != 0
+noPos   = strategy.position_size == 0
+price    = strategy.position_avg_price
+
+//--------------------------------------
+// to store entry/exit values and for plotting lines
+var float buy_en  = na
+var float buy_sl  = na
+var float buy_tp  = na
+var float buy_tp2 = na
+
+var float sell_en  = na
+var float sell_sl  = na
+var float sell_tp  = na
+var float sell_tp2 = na
+
+//--------------
+var buyTp1Hit = false       // will be true when the 1st target is hit and the stoploss will be trailed here
+var sellTp1Hit = false
+
+//=======================================================
+//           TRADES 
+//========================================================
+//------------------------------------------
+//          buy section
+if Buy and (applyTradeTime ? inSession : true) and noPos and longPositionAllowed and allowFurtherTrades
+    strategy.entry('buy', strategy.long, comment='Buy', alert_message = longEntryCommand)
+    buyTp1Hit := false
+
+if buyPos
+    if not buyPos[1]     // storing the entry / exit values as per the % set
+        // for % based
+        buy_en := price
+        buy_sl := buy_en * (1 - slPerc)
+        buy_tp := buy_en * (1 + tpPerc)
+        buy_tp2 := buy_en * (1 + (tpPerc + 0.02))
+
+    if not buyTp1Hit and ta.crossover(high, buy_tp)
+        buy_sl := buy_tp - trailPoints
+        buyTp1Hit := true
+
+    strategy.exit("exit buy",   "buy", qty_percent = 25, stop=buy_sl, limit=buy_tp,  alert_message = longExitCommand)
+    strategy.exit("exit buy 2", "buy",                   stop=buy_sl, limit=buy_tp2, alert_message = longExitCommand)
+
+if buyPos and Sell
+    strategy.close("buy", comment="exit buy", immediately=true, alert_message = longExitCommand)
+
+//------------------------------------------
+//    SELL section
+if Sell and (applyTradeTime ? inSession : true) and noPos and shortPositionAllowed and allowFurtherTrades
+    strategy.entry('sell', strategy.short, comment = "Sell", alert_message = shortEntryCommand)
+    sellTp1Hit := false
+
+if sellPos
+    if not sellPos[1]
+        // for % based
+        sell_en := price
+        sell_sl := sell_en * (1 + slPerc)
+        sell_tp := sell_en * (1 - tpPerc)
+        sell_tp2 := sell_en * (1 - (tpPerc + 0.02))
+
+    if not sellTp1Hit and ta.crossunder(low, sell_tp)
+        sell_sl := sell_tp + trailPoints
+
+    strategy.exit("exit sell",   "sell", qty_percent = 25, stop=sell_sl, limit=sell_tp,  alert_message = shortExitCommand)
+    strategy.exit("exit sell 2", "sell",                   stop=sell_sl, limit=sell_tp2, alert_message = shortExitCommand)
+
+if sellPos and Buy
+    strategy.close("sell", comment = "exit sell", immediately=true, alert_message = shortExitCommand)
+
+//============== entries
+if Buy and (applyTradeTime ? inSession : true) and sellPos[1] and longPositionAllowed and allowFurtherTrades
+    strategy.entry('buy', strategy.long, comment='Buy', alert_message = longEntryCommand)
+    buyTp1Hit := false
+
+if Sell and (applyTradeTime ? inSession : true) and buyPos[1] and shortPositionAllowed and allowFurtherTrades
+    strategy.entry('sell', strategy.short, comment = "Sell", alert_message = shortEntryCommand)
+    sellTp1Hit := false
+
+//---------------------------
+//   intraday exit section
+if applyTradeTime ? not inSession and inSession[1] : false       // exit all trades when not in session
+    strategy.cancel_all()
+    strategy.close_all("EOD Exit")
+    label.new(bar_index, high, "EOD")
+    alert("EOD", alert.freq_once_per_bar)
+
+//---------------------------
+//       daily profit limit
+var netProfitOpenValue = 0.0        // storing the opening value of net profit for the day
+var dailyPnL        = 0.0
+
+if ta.change(dayofmonth)
+    netProfitOpenValue := strategy.netprofit
+    allowFurtherTrades := true
+    dailyPnL := 0.0
+
+if allowFurtherTrades and applyDailyProfitLimit
+    dailyPnL := (strategy.netprofit - netProfitOpenValue) + strategy.openprofit
+    if dailyPnL >= dailyProfitLimit or  dailyPnL <= dailyLossLimit
+        // label.new(bar_index, high, "PL")
+        allowFurtherTrades := false
+        strategy.close_all(comment="p/l limit", immediately=true)
+
+plot(dailyPnL, "", color.black, display = display.none)
+plot(strategy.openprofit, "", color.fuchsia, display = display.none)
+//====================================================
+//                 END OF CODE
+//====================================================
